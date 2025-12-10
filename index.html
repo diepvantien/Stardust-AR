@@ -19,7 +19,7 @@
             left: 0;
             width: 100vw;
             height: 100vh;
-            z-index: 5;
+            z-index: 15; /* Higher than camera-wrapper */
             pointer-events: none;
         }
 
@@ -136,7 +136,7 @@
             right: 15px;
             width: 200px;
             height: 150px;
-            z-index: 10;
+            z-index: 18; /* Higher than canvas-container (15) */
             background: rgba(0,0,0,0.5);
             border: 1px solid #444;
             border-radius: 8px;
@@ -414,6 +414,7 @@
         
         // Dynamic Text Generator (Reuse for Voice)
         function generateTextCoordinates(text, step = 2, scaleOverride = null) {
+            console.log(`Generating text coords for: "${text}"`);
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
             const width = 3000; 
@@ -424,7 +425,7 @@
             ctx.fillStyle = 'black';
             ctx.fillRect(0, 0, width, height);
             ctx.fillStyle = 'white';
-            ctx.font = '900 250px "Segoe UI", Arial, sans-serif'; 
+            ctx.font = '900 250px Arial, sans-serif'; // Simplified font
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.fillText(text, width / 2, height / 2);
@@ -445,6 +446,7 @@
                     }
                 }
             }
+            console.log(`Generated ${coords.length} points for "${text}"`);
             return coords;
         }
 
@@ -596,15 +598,29 @@
             recognition.lang = 'en-US';
 
             recognition.onstart = () => {
+                console.log("Voice recognition started");
                 voiceIndicator.classList.add('listening');
                 voiceBtnText.innerText = "Voice Mode: ON";
                 voiceBtn.classList.add('active');
             };
 
+            recognition.onerror = (event) => {
+                console.error("Voice recognition error", event.error);
+                if (event.error === 'not-allowed') {
+                    alert("Microphone access denied. Please allow microphone access.");
+                    state.voiceEnabledByUser = false;
+                }
+                voiceIndicator.classList.remove('listening');
+            };
+
             recognition.onend = () => {
+                console.log("Voice recognition ended");
                 voiceIndicator.classList.remove('listening');
                 if (state.voiceEnabledByUser) {
-                    recognition.start(); 
+                    // Add a small delay before restarting to avoid rapid loops
+                    setTimeout(() => {
+                        try { recognition.start(); } catch(e) { console.warn("Restart failed", e); }
+                    }, 300);
                 } else {
                     voiceBtnText.innerText = "Enable Voice Mode";
                     voiceBtn.classList.remove('active');
@@ -816,13 +832,126 @@
             onFrame: async () => {
                 await hands.send({image: videoElement});
             },
-            width: 1920,
-            height: 1080
+            width: 1280,
+            height: 720
         });
         
-        cameraFeed.start().catch(err => {
-            loading.innerHTML = "Camera Error: " + err.message;
-        });
+        async function startCamera() {
+            try {
+                loading.innerHTML = "Requesting Camera Access...";
+                // Check if browser supports getUserMedia
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error("Browser API 'navigator.mediaDevices.getUserMedia' not available");
+                }
+
+                // Explicitly request permission first to debug
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                // Stop the stream immediately, we just wanted to check permission/availability
+                stream.getTracks().forEach(track => track.stop());
+                
+                loading.innerHTML = "Starting MediaPipe Camera...";
+                await cameraFeed.start();
+            } catch (err) {
+                console.error("Camera Error:", err);
+                loading.innerHTML = `Camera not found (${err.name}).<br>Switching to <b>Mouse Interaction Mode</b>.`;
+                setTimeout(() => {
+                    loading.style.display = 'none';
+                    activateMouseMode();
+                }, 2500);
+            }
+        }
+
+        let isMouseMode = false;
+        function activateMouseMode() {
+            isMouseMode = true;
+            state.isHandDetected = true; // Always "detect" hand in mouse mode
+            
+            // Keep camera wrapper visible but indicate no signal
+            const camWrapper = document.getElementById('camera-wrapper');
+            camWrapper.style.display = 'flex'; // Ensure it's visible
+            camWrapper.style.justifyContent = 'center';
+            camWrapper.style.alignItems = 'center';
+            camWrapper.style.background = 'rgba(20, 20, 20, 0.8)';
+            camWrapper.style.border = '1px solid #444';
+            
+            const video = document.getElementById('webcam-preview');
+            video.style.opacity = '0.1'; // Dim the broken video element
+            
+            // Add a placeholder text if not exists
+            if (!document.getElementById('no-cam-msg')) {
+                const msg = document.createElement('div');
+                msg.id = 'no-cam-msg';
+                msg.innerHTML = "NO CAMERA<br>Mouse Mode";
+                msg.style.color = '#aaa';
+                msg.style.textAlign = 'center';
+                msg.style.fontSize = '12px';
+                msg.style.position = 'absolute';
+                camWrapper.appendChild(msg);
+            }
+            
+            // Add mouse listener for interaction
+            window.addEventListener('mousemove', (event) => {
+                // Map mouse to 3D world coordinates on z=0 plane
+                const vec = new THREE.Vector3();
+                const pos = new THREE.Vector3();
+                
+                vec.set(
+                    (event.clientX / window.innerWidth) * 2 - 1,
+                    -(event.clientY / window.innerHeight) * 2 + 1,
+                    0.5
+                );
+                
+                vec.unproject(camera);
+                vec.sub(camera.position).normalize();
+                
+                const distance = -camera.position.z / vec.z;
+                pos.copy(camera.position).add(vec.multiplyScalar(distance));
+                
+                state.handPositions = [pos];
+                
+                // Map mouse X to rotation
+                state.handPositionRaw.x = event.clientX / window.innerWidth;
+                state.handPositionRaw.y = event.clientY / window.innerHeight;
+            });
+
+            // Add click listener to cycle gestures
+            let gestureIndex = 0;
+            window.addEventListener('click', () => {
+                if (state.voiceModeActive) return;
+                
+                gestureIndex = (gestureIndex + 1) % 5; // 0 to 4
+                const g = gestureIndex;
+                
+                if (g === 0) {
+                    state.targetGestureLabel = "Mouse Click: Scatter";
+                    state.spreadTarget = 1.0;
+                    state.galaxyEffectActive = false;
+                } else {
+                    state.targetGestureLabel = "Mouse Click: " + getLabel(g);
+                    state.spreadTarget = 0.0;
+                    state.targetWeights = getWeights(g);
+                    state.galaxyEffectActive = (g === 4);
+                }
+                updateUI();
+            });
+            
+            // Update UI instructions
+            const uiContent = document.getElementById('ui-content');
+            const helpText = uiContent.querySelector('div[style*="font-size: 11px"]');
+            if(helpText) {
+                helpText.innerHTML = `
+                    <b>Mouse Mode Active:</b><br>
+                    🖱️ Move mouse to interact<br>
+                    🖱️ Click to cycle gestures<br>
+                    (I -> LOVE -> YOU -> ...)<br>
+                    <br>
+                    <b>Voice Mode:</b><br>
+                    🎤 Still works if Mic is available
+                `;
+            }
+        }
+
+        startCamera();
 
         /**
          * ANIMATION
@@ -834,7 +963,13 @@
             if (state.voiceModeActive !== state.wasVoiceModeActive) {
                 if (state.voiceModeActive) {
                     camWrapper.classList.add('fullscreen');
-                    scene.background = null; 
+                    // Only make background transparent if camera is actually working/visible
+                    if (!isMouseMode) {
+                        scene.background = null; 
+                    } else {
+                        scene.background = new THREE.Color(0x050505);
+                    }
+                    
                     // Reset position when entering fullscreen to ensure it covers everything
                     camWrapper.style.top = '';
                     camWrapper.style.left = '';
