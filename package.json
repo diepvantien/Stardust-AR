@@ -8,12 +8,9 @@
     "build": "vite build",
     "preview": "vite preview"
   },
-  "dependencies": {
-
-  },
   "devDependencies": {
     "@types/node": "^22.14.0",
-    
+    "@vitejs/plugin-basic-ssl": "^2.1.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }
